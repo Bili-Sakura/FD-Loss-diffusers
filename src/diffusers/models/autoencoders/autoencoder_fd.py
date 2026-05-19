@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from diffusers.models import AutoencoderKL
 
-logger = logging.getLogger("FD_loss")
+logger = logging.getLogger("fd_diffusers")
 
 MODEL_MAPPING = {
     "sdvae": {

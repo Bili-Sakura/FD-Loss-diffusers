@@ -5,28 +5,29 @@ import torch
 import torch.nn as nn
 from tqdm import trange
 
-from .mit import MiT_models
+from ..transformers.transformer_mit import MiT_models
 
-logger = logging.getLogger("FD_loss")
+logger = logging.getLogger("fd_diffusers")
 
 
-class iMFDenoiser(nn.Module):
-    """imf denoiser with cfg-aware training and jvp-based loss."""
+class pMFDenoiser(nn.Module):
+    """pixel meanflow denoiser with cfg-aware training and perceptual loss."""
 
     def __init__(
         self,
         backbone="MiT_B",
         img_size=256,
         patch_size=16,
-        in_channels=4,
+        in_channels=3,
         tokenizer_patch_size=1,
+        bottleneck_dim=128,
         num_classes=1000,
         label_drop_prob=0.1,
-        P_mean=-0.4,
-        P_std=1.0,
+        P_mean=0.8,
+        P_std=0.8,
         ratio_r_neq_t=0.5,
         cfg_beta=1.0,
-        cfg_omega_max=8.0,
+        cfg_omega_max=7.0,
         aux_head_depth=8,
         class_tokens=8,
         time_tokens=4,
@@ -35,25 +36,37 @@ class iMFDenoiser(nn.Module):
         token_init_constant=1.0,
         embedding_init_constant=1.0,
         weight_init_constant=0.32,
+        tr_uniform=False,
         norm_eps=1e-4,
         norm_p=1.0,
-        rope_2d=True,
-        learned_pe=True,
+        t_eps=0.05,
+        noise_scale=None,
+        perceptual_threshold=0.8,
+        perceptual_loss_on_aux=False,
+        rope_2d=False,
+        learned_pe=False,
         disable_v_head=False,
     ):
         super().__init__()
-        self.input_size = img_size // tokenizer_patch_size
+        assert tokenizer_patch_size == 1, "tokenizer_patch_size must be 1 for pMF"
+        assert in_channels == 3, "in_channels must be 3 for pMF"
+
+        self.input_size = self.img_size = img_size
         self.num_classes = num_classes
         self.in_channels = in_channels
         self.label_drop_prob = label_drop_prob
         self.P_mean = P_mean
         self.P_std = P_std
         self.ratio_r_neq_t = ratio_r_neq_t
+        self.t_eps = t_eps
         self.cfg_beta = cfg_beta
         self.cfg_omega_max = cfg_omega_max
         self.norm_p = norm_p
         self.norm_eps = norm_eps
-
+        self.tr_uniform = tr_uniform
+        self.perceptual_threshold = perceptual_threshold
+        self.perceptual_loss_on_aux = perceptual_loss_on_aux
+        self.noise_scale = noise_scale if noise_scale is not None else img_size / 256.0
         if backbone not in MiT_models:
             raise ValueError(f"unknown backbone: {backbone}. available: {list(MiT_models.keys())}")
         self.net = MiT_models[backbone](
@@ -69,14 +82,17 @@ class iMFDenoiser(nn.Module):
             token_init_constant=token_init_constant,
             embedding_init_constant=embedding_init_constant,
             weight_init_constant=weight_init_constant,
-            output_type="v",
+            bottleneck_dim=bottleneck_dim,
+            output_type="x",
             rope_2d=rope_2d,
             learned_pe=learned_pe,
             disable_v_head=disable_v_head,
+            t_eps=t_eps,
         )
 
-        n_params = sum(p.numel() for p in self.parameters()) / 1e6
-        logger.info(f"[iMF Denoiser] params: {n_params:.2f}M, backbone: {backbone}")
+        n_params = sum(p.numel() for p in self.parameters() if p.requires_grad) / 1e6
+        logger.info(f"[pMF Denoiser] params: {n_params:.2f}M, backbone: {backbone}, rope_2d: {rope_2d}, learned_pe: {learned_pe}")
+        logger.info(f"[pMF Denoiser] noise_scale: {self.noise_scale:.3f}")
 
     def sample_t(self, n, device):
         return torch.sigmoid(torch.randn(n, 1, 1, 1, device=device) * self.P_std + self.P_mean)
@@ -85,11 +101,19 @@ class iMFDenoiser(nn.Module):
         t = self.sample_t(n, device)
         r = self.sample_t(n, device)
         # ensure t >= r
-        t, r = torch.maximum(t, r), torch.minimum(t, r)
+        # t, r = torch.maximum(t, r), torch.minimum(t, r)
+        if self.tr_uniform:
+            # 10% random tr samples
+            unif_mask = torch.rand((n, 1, 1, 1), device=device) < 0.1
+            t = torch.where(unif_mask, torch.rand((n, 1, 1, 1), device=device), t)
+            r = torch.where(unif_mask, torch.rand((n, 1, 1, 1), device=device), r)
 
+        # set r=t for FM samples first, then ensure t >= r (matches JAX ordering)
         data_size = int(n * self.ratio_r_neq_t)
         fm_mask = (torch.arange(n, device=device) < data_size).view(n, 1, 1, 1)
         r = torch.where(fm_mask, t, r)
+        t, r = torch.maximum(t, r), torch.minimum(t, r)
+
         return t, r, fm_mask
 
     def sample_cfg_scale(self, n, device):
@@ -111,11 +135,12 @@ class iMFDenoiser(nn.Module):
 
     def u_fn(self, x, t, h, omega, t_min, t_max, y):
         bz = x.shape[0]
-        return self.net(
+        out = self.net(
             x=x, t=t.reshape(bz), h=h.reshape(bz),
             omega=omega.reshape(bz), t_min=t_min.reshape(bz),
             t_max=t_max.reshape(bz), y=y,
         )
+        return out.sample, out.aux_sample
 
     def v_cond_fn(self, x, t, omega, y):
         bz = x.shape[0]
@@ -163,13 +188,13 @@ class iMFDenoiser(nn.Module):
         weight = (loss_per_sample + self.norm_eps) ** self.norm_p
         return loss_per_sample / weight.detach()
 
-    def forward(self, x, y):
+    def forward(self, x, y, aux_loss_fn=None):
         B, device = x.shape[0], x.device
 
         t, r, fm_mask = self.sample_tr(B, device)
-        e = torch.randn_like(x)
+        e = torch.randn_like(x) * self.noise_scale
         z_t = (1 - t) * x + t * e
-        v_t = e - x
+        v_t = (z_t - x) / t.clamp(self.t_eps, 1.0)
 
         t_min, t_max = self.sample_cfg_interval(B, device, fm_mask)
         omega = self.sample_cfg_scale(B, device)
@@ -192,33 +217,53 @@ class iMFDenoiser(nn.Module):
         loss_u = ((V - v_g) ** 2).sum(dim=(1, 2, 3))
         loss_v = ((v - v_g) ** 2).sum(dim=(1, 2, 3))
 
-        loss = (self.adaptive_weight(loss_u) + self.adaptive_weight(loss_v)).mean()
+        loss_u_w = self.adaptive_weight(loss_u)
+        loss_v_w = self.adaptive_weight(loss_v)
+
+        if aux_loss_fn is not None and self.training:
+            pred_x = z_t - t * u
+            # only apply perceptual loss when t < threshold
+            mask = t.view(-1) < self.perceptual_threshold
+            aux_loss, aux_loss_dict = aux_loss_fn(pred_x, x, mask)
+            
+            if self.perceptual_loss_on_aux:
+                pred_x_aux = z_t - t * v
+                aux_loss_aux, aux_loss_dict_aux = aux_loss_fn(pred_x_aux, x, mask)
+                aux_loss = aux_loss + 0.5 * aux_loss_aux
+                aux_loss_dict.update(
+                    {f"v_head_{k}": v for k, v in aux_loss_dict_aux.items()}
+                )
+        else:
+            aux_loss_dict = {}
+            aux_loss = torch.zeros(B, device=device)
+        loss = (loss_u_w + loss_v_w + aux_loss).mean()
 
         loss_dict = {
-            "loss": loss.item(),
+            # "total_loss": loss.item(), # loss will be logged directly by the trainer, no need to log here
             "loss_u": ((V - v_g) ** 2).mean().item(),
             "loss_v": ((v - v_g) ** 2).mean().item(),
+            **aux_loss_dict,
         }
         return loss, loss_dict
-
+    
     def sample_images_with_grad(self, x, y, sampling_args=None):
         bsz, device = x.shape[0], x.device
         if sampling_args is None:
             sampling_args = {}
+        t_min = sampling_args.get("t_min", 0.4)
+        t_max = sampling_args.get("t_max", 0.65)
+        omega = sampling_args.get("cfg", 1.0)
         num_steps = sampling_args.get("num_steps", 1)
-        cfg = sampling_args.get("cfg", 1.0)
-        t_min_val = sampling_args.get("t_min", 0.0)
-        t_max_val = sampling_args.get("t_max", 1.0)
+        
+        t_min = torch.full((bsz,), t_min, device=device)
+        t_max = torch.full((bsz,), t_max, device=device)
+        omega = torch.full((bsz,), omega, device=device)
 
         t_steps = torch.linspace(1.0, 0.0, num_steps + 1, device=device)
-        omega = torch.full((bsz,), cfg, device=device)
-        t_min = torch.full((bsz,), t_min_val, device=device)
-        t_max = torch.full((bsz,), t_max_val, device=device)
-
         for i in range(num_steps):
             t_cur = t_steps[i].expand(bsz)
             h_t = (t_cur - t_steps[i + 1]).expand(bsz).view(-1, 1, 1, 1)
-            u = self.u_fn(x, t_cur, h_t, omega, t_min, t_max, y=y)[0]
+            u = self.u_fn(x, t_cur, h_t, omega, t_min, t_max, y)[0]
             x = x - h_t * u
         return x
 
@@ -232,12 +277,13 @@ class iMFDenoiser(nn.Module):
         t_max_val = args.interval_max if args else 0.65
 
         x_shape = (n_samples, self.in_channels, self.input_size, self.input_size)
-        if z_t is None:
+        if z_t is None: # sample noise if not provided
             if args.same_noise:
                 z_t = torch.randn(1, *x_shape[1:], device=device, dtype=dtype)
                 z_t = z_t.repeat(n_samples, *([1] * (len(x_shape) - 1)))
             else:
                 z_t = torch.randn(x_shape, device=device, dtype=dtype)
+            z_t = z_t * self.noise_scale
 
         t_steps = torch.linspace(1.0, 0.0, num_steps + 1, dtype=dtype, device=device)
         omega = torch.full((n_samples,), cfg, dtype=dtype, device=device)
@@ -257,22 +303,29 @@ class iMFDenoiser(nn.Module):
 
         return z_t
 
-
-# checkpoint conversion
-
-def convert_imf_checkpoint(state_dict):
+def convert_pmf_checkpoint(state_dict):
+    """Convert upstream pMF checkpoint keys to match our model structure."""
     new_state_dict = {}
     for key, value in state_dict.items():
+        # rename flax-style linear/embedding layers
         key = key.replace("._flax_linear.", ".linear.")
         key = key.replace("._flax_embedding.", ".embedding.")
+        # squeeze token params from (1, N, D) to (N, D)
+        if key.endswith("_tokens") and value.dim() == 3 and value.shape[0] == 1:
+            value = value.squeeze(0)
+        # skip rope_freqs buffer (we compute it on the fly)
+        if "rope_freqs" in key:
+            continue
         new_state_dict[key] = value
     return new_state_dict
 
 
 # model registry
-iMFDenoiser_models = {
-    "iMF_B": lambda **kw: iMFDenoiser(backbone="MiT_B", **kw),
-    "iMF_M": lambda **kw: iMFDenoiser(backbone="MiT_M", **kw),
-    "iMF_L": lambda **kw: iMFDenoiser(backbone="MiT_L", **kw),
-    "iMF_XL": lambda **kw: iMFDenoiser(backbone="MiT_XL", **kw),
+pMFDenoiser_models = {
+    "pMF_T": lambda **kw: pMFDenoiser(backbone="MiT_T", bottleneck_dim=128, **kw),
+    "pMF_B": lambda **kw: pMFDenoiser(backbone="MiT_B2", bottleneck_dim=128, **kw),
+    "pMF_M": lambda **kw: pMFDenoiser(backbone="MiT_M", bottleneck_dim=128, **kw),
+    "pMF_L": lambda **kw: pMFDenoiser(backbone="MiT_L", bottleneck_dim=128, **kw),
+    "pMF_H": lambda **kw: pMFDenoiser(backbone="MiT_H", bottleneck_dim=256, **kw),
+    "pMF_XL": lambda **kw: pMFDenoiser(backbone="MiT_XL", bottleneck_dim=256, **kw),
 }

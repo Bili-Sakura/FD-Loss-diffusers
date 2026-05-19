@@ -38,6 +38,12 @@ Download ImageNet and place it in your `DATA_ROOT` using the standard
 export DATA_ROOT=/path/to/imagenet
 ```
 
+### Diffusers layout
+
+Generation backbones and denoisers are implemented under [`src/diffusers`](src/diffusers) using native
+Diffusers `ModelMixin` / `ConfigMixin` APIs. See [`README_DIFFUSERS.md`](README_DIFFUSERS.md) for
+module layout and upstreaming notes.
+
 ### Installation
 
 Download the code:

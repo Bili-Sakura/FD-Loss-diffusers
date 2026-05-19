@@ -1,17 +1,59 @@
+# Copyright 2026 The FD-Loss Authors. SPDX-License-Identifier: MIT
 import logging
 import math
+from dataclasses import dataclass
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .commons import (
+try:
+    from diffusers.configuration_utils import ConfigMixin, register_to_config
+    from diffusers.models.modeling_utils import ModelMixin
+    from diffusers.utils import BaseOutput
+except Exception:  # pragma: no cover - standalone testing without full diffusers install.
+    class BaseOutput(dict):
+        def __post_init__(self):
+            self.update(self.__dict__)
+
+    class _Config(dict):
+        def __getattr__(self, key):
+            try:
+                return self[key]
+            except KeyError as error:
+                raise AttributeError(key) from error
+
+    class ConfigMixin:
+        config_name = "config.json"
+
+    class ModelMixin(nn.Module):
+        pass
+
+    def register_to_config(init):
+        def wrapper(self, *args, **kwargs):
+            import inspect
+
+            signature = inspect.signature(init)
+            bound = signature.bind(self, *args, **kwargs)
+            bound.apply_defaults()
+            self.config = _Config({key: value for key, value in bound.arguments.items() if key != "self"})
+            return init(self, *args, **kwargs)
+
+        return wrapper
+
+from ...utils.layers import (
     precompute_rope_freqs, precompute_rope_freqs_2d,
     apply_rotary_pos_emb, apply_rotary_pos_emb_partial,
     modulate, RMSNorm, get_2d_sincos_pos_embed
 )
 
-logger = logging.getLogger("FD_loss")
+logger = logging.getLogger("fd_diffusers")
+
+
+@dataclass
+class JiTTransformer2DModelOutput(BaseOutput):
+    sample: torch.FloatTensor
 
 
 class _RoPECallable:
@@ -160,9 +202,10 @@ class JiTBlock(nn.Module):
         return x
 
 
-class JiT(nn.Module):
-    """just image transformer."""
+class JiTTransformer2DModel(ModelMixin, ConfigMixin):
+    """Just Image Transformer for class-conditional flow matching."""
 
+    @register_to_config
     def __init__(
         self,
         input_size=256,
@@ -289,26 +332,37 @@ class JiT(nn.Module):
             x = block(x, c, self._rope if i < self.in_context_start else self._rope_with_prefix)
 
         x = x[:, self.in_context_len:]
-        return self.unpatchify(self.final_layer(x, c), self.patch_size)
+        sample = self.unpatchify(self.final_layer(x, c), self.patch_size)
+        return JiTTransformer2DModelOutput(sample=sample)
+
+
+# Backwards-compatible alias used by denoiser registries.
+JiT = JiTTransformer2DModel
 
 
 def JiT_B(**kwargs):
-    return JiT(depth=12, hidden_size=768, num_heads=12,
-               bottleneck_dim=128, in_context_len=32, in_context_start=4, patch_size=16, **kwargs)
+    return JiTTransformer2DModel(
+        depth=12, hidden_size=768, num_heads=12,
+        bottleneck_dim=128, in_context_len=32, in_context_start=4, patch_size=16, **kwargs,
+    )
 
 
 def JiT_L(**kwargs):
-    return JiT(depth=24, hidden_size=1024, num_heads=16,
-               bottleneck_dim=128, in_context_len=32, in_context_start=8, patch_size=16, **kwargs)
+    return JiTTransformer2DModel(
+        depth=24, hidden_size=1024, num_heads=16,
+        bottleneck_dim=128, in_context_len=32, in_context_start=8, patch_size=16, **kwargs,
+    )
 
 
 def JiT_H(**kwargs):
-    return JiT(depth=32, hidden_size=1280, num_heads=16,
-               bottleneck_dim=256, in_context_len=32, in_context_start=10, patch_size=16, **kwargs)
+    return JiTTransformer2DModel(
+        depth=32, hidden_size=1280, num_heads=16,
+        bottleneck_dim=256, in_context_len=32, in_context_start=10, patch_size=16, **kwargs,
+    )
 
 
 JiT_models = {
-    'JiT-B': JiT_B,
-    'JiT-L': JiT_L,
-    'JiT-H': JiT_H,
+    "JiT-B": JiT_B,
+    "JiT-L": JiT_L,
+    "JiT-H": JiT_H,
 }

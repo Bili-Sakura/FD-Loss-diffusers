@@ -2,7 +2,17 @@ import logging
 
 import torch
 
-import models
+from utils.fd_diffusers_bootstrap import register_fd_diffusers
+
+register_fd_diffusers()
+
+from fd_diffusers import (  # noqa: E402
+    DiffusersAutoencoderKL,
+    JiTDenoiser_models,
+    VAE_models,
+    iMFDenoiser_models,
+    pMFDenoiser_models,
+)
 from utils.distributed_util import broadcast_module_params, is_enabled
 from utils.ema_util import EMAModel
 
@@ -17,8 +27,8 @@ def create_generation_model(args):
     logger.info("Creating generation models.")
 
 
-    if args.model in models.JiTDenoiser_models:
-        model = models.JiTDenoiser_models[args.model](
+    if args.model in JiTDenoiser_models:
+        model = JiTDenoiser_models[args.model](
             img_size=args.img_size,
             num_classes=args.num_classes,
             label_drop_prob=args.label_drop_prob,
@@ -31,8 +41,8 @@ def create_generation_model(args):
             learned_pe=args.learned_pe,
             legacy_time_convention=args.legacy_time_convention,
         )
-    elif args.model in models.iMFDenoiser_models:
-        model = models.iMFDenoiser_models[args.model](
+    elif args.model in iMFDenoiser_models:
+        model = iMFDenoiser_models[args.model](
             img_size=args.img_size,
             patch_size=args.patch_size,
             in_channels=args.token_channels,
@@ -54,8 +64,8 @@ def create_generation_model(args):
             learned_pe=args.learned_pe,
             disable_v_head=args.disable_v_head,
         )
-    elif args.model in models.pMFDenoiser_models:
-        model = models.pMFDenoiser_models[args.model](
+    elif args.model in pMFDenoiser_models:
+        model = pMFDenoiser_models[args.model](
             img_size=args.img_size,
             patch_size=args.patch_size,
             in_channels=args.token_channels,
@@ -110,8 +120,8 @@ def create_tokenizer(args):
         return None
     logger.info(f"creating tokenizer: {args.tokenizer}")
 
-    if args.tokenizer in models.VAE_models:
-        tok = models.DiffusersAutoencoderKL(name=args.tokenizer)
+    if args.tokenizer in VAE_models:
+        tok = DiffusersAutoencoderKL(name=args.tokenizer)
     else:
         raise ValueError(f"unsupported tokenizer {args.tokenizer}")
 

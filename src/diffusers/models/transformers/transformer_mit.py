@@ -1,19 +1,62 @@
+# Copyright 2026 The FD-Loss Authors. SPDX-License-Identifier: MIT
 import logging
 import math
+from dataclasses import dataclass
 from functools import partial
+from typing import Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .commons import (
+try:
+    from diffusers.configuration_utils import ConfigMixin, register_to_config
+    from diffusers.models.modeling_utils import ModelMixin
+    from diffusers.utils import BaseOutput
+except Exception:  # pragma: no cover
+    class BaseOutput(dict):
+        def __post_init__(self):
+            self.update(self.__dict__)
+
+    class _Config(dict):
+        def __getattr__(self, key):
+            try:
+                return self[key]
+            except KeyError as error:
+                raise AttributeError(key) from error
+
+    class ConfigMixin:
+        config_name = "config.json"
+
+    class ModelMixin(nn.Module):
+        pass
+
+    def register_to_config(init):
+        def wrapper(self, *args, **kwargs):
+            import inspect
+
+            signature = inspect.signature(init)
+            bound = signature.bind(self, *args, **kwargs)
+            bound.apply_defaults()
+            self.config = _Config({key: value for key, value in bound.arguments.items() if key != "self"})
+            return init(self, *args, **kwargs)
+
+        return wrapper
+
+from ...utils.layers import (
     TorchLinear, RMSNorm, SwiGLUMlp, PatchEmbedder, BottleneckPatchEmbed,
     apply_rotary_pos_emb, apply_rotary_pos_emb_partial,
     precompute_rope_freqs, precompute_rope_freqs_2d,
     TimestepEmbedder, LabelEmbedder,
 )
 
-logger = logging.getLogger("FD_loss")
+logger = logging.getLogger("fd_diffusers")
+
+
+@dataclass
+class MiTTransformer2DModelOutput(BaseOutput):
+    sample: torch.FloatTensor
+    aux_sample: torch.FloatTensor
 
 
 class RoPEAttention(nn.Module):
@@ -93,9 +136,10 @@ class FinalLayer(nn.Module):
         return self.linear(self.norm(x))
 
 
-class MiT(nn.Module):
-    """meanflow improved transformer with shared backbone and dual u/v heads."""
+class MiTTransformer2DModel(ModelMixin, ConfigMixin):
+    """MeanFlow improved transformer with shared backbone and dual u/v heads."""
 
+    @register_to_config
     def __init__(
         self,
         input_size: int = 32,
@@ -262,22 +306,26 @@ class MiT(nn.Module):
 
         if self.disable_v_head:
             u_out = self.output_conversion(x, u, t)
-            return u_out, torch.zeros_like(u_out)
+            return MiTTransformer2DModelOutput(sample=u_out, aux_sample=torch.zeros_like(u_out))
 
         v_seq = seq
         for block in self.v_heads:
             v_seq = block(v_seq, self.rope_freqs)
         v = self.unpatchify(self.v_final_layer(v_seq[:, self.prefix_tokens:]))
-        return self.output_conversion(x, u, t), self.output_conversion(x, v, t)
+        u_out = self.output_conversion(x, u, t)
+        v_out = self.output_conversion(x, v, t)
+        return MiTTransformer2DModelOutput(sample=u_out, aux_sample=v_out)
 
 
-MiT_T = partial(MiT, depth=4, hidden_size=512, num_heads=8)
-MiT_B = partial(MiT, depth=12, hidden_size=768, num_heads=12)
-MiT_B2 = partial(MiT, depth=16, hidden_size=768, num_heads=12)
-MiT_M = partial(MiT, depth=24, hidden_size=768, num_heads=12)
-MiT_L = partial(MiT, depth=32, hidden_size=1024, num_heads=16)
-MiT_XL = partial(MiT, depth=48, hidden_size=1024, num_heads=16)
-MiT_H = partial(MiT, depth=48, hidden_size=1280, num_heads=16)
+MiT = MiTTransformer2DModel
+
+MiT_T = partial(MiTTransformer2DModel, depth=4, hidden_size=512, num_heads=8)
+MiT_B = partial(MiTTransformer2DModel, depth=12, hidden_size=768, num_heads=12)
+MiT_B2 = partial(MiTTransformer2DModel, depth=16, hidden_size=768, num_heads=12)
+MiT_M = partial(MiTTransformer2DModel, depth=24, hidden_size=768, num_heads=12)
+MiT_L = partial(MiTTransformer2DModel, depth=32, hidden_size=1024, num_heads=16)
+MiT_XL = partial(MiTTransformer2DModel, depth=48, hidden_size=1024, num_heads=16)
+MiT_H = partial(MiTTransformer2DModel, depth=48, hidden_size=1280, num_heads=16)
 
 MiT_models = {
     "MiT_T": MiT_T,

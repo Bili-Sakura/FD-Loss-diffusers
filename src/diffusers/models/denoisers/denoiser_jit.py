@@ -4,9 +4,9 @@ import torch
 import torch.nn as nn
 from tqdm import trange
 
-from .jit import JiT_models
+from ..transformers.transformer_jit import JiT_models
 
-logger = logging.getLogger("FD_loss")
+logger = logging.getLogger("fd_diffusers")
 
 
 class JiTDenoiser(nn.Module):
@@ -71,7 +71,7 @@ class JiTDenoiser(nn.Module):
         z = (1 - t) * x + t * e
         v = (z - x) / t.clamp_min(self.t_eps)
 
-        x_pred = self.net(z, self._backbone_t(t).flatten(), labels)
+        x_pred = self.net(z, self._backbone_t(t).flatten(), labels).sample
         v_pred = (z - x_pred) / t.clamp_min(self.t_eps)
         loss = ((v - v_pred) ** 2).mean(dim=(1, 2, 3)).mean()
         loss_dict = {} # for compatibility
@@ -87,12 +87,12 @@ class JiTDenoiser(nn.Module):
     def _forward_with_cfg(self, z, t, labels, cfg, cfg_interval=None):
         t_bb = self._backbone_t(t).flatten()
 
-        x_cond = self.net(z, t_bb, labels)
+        x_cond = self.net(z, t_bb, labels).sample
         v_cond = (z - x_cond) / t.clamp_min(self.t_eps)
         if cfg == 1.0:
             return v_cond
 
-        x_uncond = self.net(z, t_bb, torch.full_like(labels, self.num_classes))
+        x_uncond = self.net(z, t_bb, torch.full_like(labels, self.num_classes)).sample
         v_uncond = (z - x_uncond) / t.clamp_min(self.t_eps)
 
         if cfg_interval is not None:
