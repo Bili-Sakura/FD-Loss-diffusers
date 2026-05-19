@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .commons import (
+from ..commons import (
     TorchLinear, RMSNorm, SwiGLUMlp, PatchEmbedder, BottleneckPatchEmbed,
     apply_rotary_pos_emb, apply_rotary_pos_emb_partial,
     precompute_rope_freqs, precompute_rope_freqs_2d,

@@ -2,7 +2,7 @@ import logging
 
 import torch
 
-import models
+import fdloss_diffusers.models as models
 from utils.distributed_util import broadcast_module_params, is_enabled
 from utils.ema_util import EMAModel
 

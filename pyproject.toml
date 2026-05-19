@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fd-loss"
+version = "0.1.0"
+description = "Representation Fréchet Loss for visual generation with Diffusers-style model layout."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "diffusers>=0.30.1",
+    "einops",
+    "gdown",
+    "muon-optimizer",
+    "torch",
+    "torchvision",
+    "rich",
+    "opencv-python",
+    "wandb",
+    "matplotlib",
+    "tabulate",
+    "scipy",
+    "timm",
+    "pandas",
+]
+
+[tool.setuptools]
+packages = ["fdloss_diffusers", "fdloss_diffusers.models", "fdloss_diffusers.models.transformers"]
+
+[tool.setuptools.package-dir]
+fdloss_diffusers = "src/diffusers"

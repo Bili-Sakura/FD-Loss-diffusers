@@ -180,7 +180,7 @@ def ckpt_resume(
 
     if args.load_from and not args.resume_from:
         if os.path.exists(args.load_from):
-            import models
+            import fdloss_diffusers.models as models
             logger.info(f"[Model-load] Loading checkpoint from: {args.load_from}")
             checkpoint = torch.load(args.load_from, map_location="cpu", weights_only=False)
 
@@ -190,12 +190,12 @@ def ckpt_resume(
                 state_dict = checkpoint
 
             if args.model in models.iMFDenoiser_models:
-                from models.denoiser_imf import convert_imf_checkpoint
+                from fdloss_diffusers.models.transformers.denoiser_imf import convert_imf_checkpoint
                 logger.info(f"[Model-load] Converting official iMF checkpoint keys")
                 state_dict = convert_imf_checkpoint(state_dict)
 
             if args.model in models.pMFDenoiser_models:
-                from models.denoiser_pmf import convert_pmf_checkpoint
+                from fdloss_diffusers.models.transformers.denoiser_pmf import convert_pmf_checkpoint
                 logger.info(f"[Model-load] Converting official pMF checkpoint keys")
                 state_dict = convert_pmf_checkpoint(state_dict)
 

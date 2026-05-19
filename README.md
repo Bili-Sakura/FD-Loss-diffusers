@@ -47,6 +47,14 @@ git clone https://github.com/Jiawei-Yang/FD-Loss.git
 cd FD-Loss
 ```
 
+Install the project in editable mode so the generation stack is importable as
+`fdloss_diffusers` (Diffusers-style layout under `src/diffusers`; see
+[README_DIFFUSERS.md](README_DIFFUSERS.md)):
+
+```bash
+pip install -e .
+```
+
 Create and activate a conda environment:
 
 ```bash
