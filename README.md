@@ -47,14 +47,6 @@ git clone https://github.com/Jiawei-Yang/FD-Loss.git
 cd FD-Loss
 ```
 
-Install the project in editable mode so the generation stack is importable as
-`fdloss_diffusers` (Diffusers-style layout under `src/diffusers`; see
-[README_DIFFUSERS.md](README_DIFFUSERS.md)):
-
-```bash
-pip install -e .
-```
-
 Create and activate a conda environment:
 
 ```bash
@@ -64,8 +56,11 @@ conda activate fdloss
 pip install --upgrade pip
 pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
+pip install -e .
 pip install -U huggingface_hub
 ```
+
+The generators live under `src/diffusers` and import as **`fdloss_diffusers`** so the PyPI **`diffusers`** package remains available for VAE loading. See [README_DIFFUSERS.md](README_DIFFUSERS.md) for layout and upstreaming notes.
 
 ### Checkpoints And Statistics
 
