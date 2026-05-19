@@ -180,7 +180,13 @@ def ckpt_resume(
 
     if args.load_from and not args.resume_from:
         if os.path.exists(args.load_from):
-            import models
+            from utils.fd_diffusers_bootstrap import register_fd_diffusers
+
+            register_fd_diffusers()
+            from fd_diffusers import iMFDenoiser_models, pMFDenoiser_models
+            from fd_diffusers.models.denoisers.denoiser_imf import convert_imf_checkpoint
+            from fd_diffusers.models.denoisers.denoiser_pmf import convert_pmf_checkpoint
+
             logger.info(f"[Model-load] Loading checkpoint from: {args.load_from}")
             checkpoint = torch.load(args.load_from, map_location="cpu", weights_only=False)
 
@@ -189,14 +195,12 @@ def ckpt_resume(
             else:
                 state_dict = checkpoint
 
-            if args.model in models.iMFDenoiser_models:
-                from models.denoiser_imf import convert_imf_checkpoint
-                logger.info(f"[Model-load] Converting official iMF checkpoint keys")
+            if args.model in iMFDenoiser_models:
+                logger.info("[Model-load] Converting official iMF checkpoint keys")
                 state_dict = convert_imf_checkpoint(state_dict)
 
-            if args.model in models.pMFDenoiser_models:
-                from models.denoiser_pmf import convert_pmf_checkpoint
-                logger.info(f"[Model-load] Converting official pMF checkpoint keys")
+            if args.model in pMFDenoiser_models:
+                logger.info("[Model-load] Converting official pMF checkpoint keys")
                 state_dict = convert_pmf_checkpoint(state_dict)
 
             if len(state_dict) > 0:
